@@ -19,27 +19,52 @@ const targets = role => (process.env['ROLE_' + role] || '').split(',').map(s => 
 const mask = t => (t.length > 4 ? '…' + t.slice(-4) : t);
 const xml = s => String(s).replace(/[<>&'"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
 
-async function twilio(path, form) {
+// Trial Twilio accounts refuse inline TwiML on the Calls API, so the call fetches its
+// spoken message from this same function (GET ?twiml=1). If even that is refused,
+// fall back to Twilio's own text-to-speech template so the phone still rings.
+const TEMPLATE_URL = 'https://webhooks.twilio.com/v1/Voice/Template/voice_text_to_speech';
+const trialRefusal = e => /trial|disallowed|not allowed|parameter/i.test(e || '');
+
+function twimlFor(text, lang) {
+  const v = VOICE[lang] || VOICE.en;
+  const say = `<Say voice="${v.voice}" language="${v.language}">${xml(text)}</Say>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/>${say}<Pause length="1"/>${say}</Response>`;
+}
+
+async function twilio(path, form, withFrom = true) {
   const sid = process.env.TWILIO_ACCOUNT_SID, tok = process.env.TWILIO_AUTH_TOKEN;
   if (!sid || !tok || !process.env.TWILIO_FROM_NUMBER) return { ok: false, error: 'Twilio keys are not set' };
   const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/${path}.json`, {
     method: 'POST',
     headers: { Authorization: 'Basic ' + Buffer.from(`${sid}:${tok}`).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ From: process.env.TWILIO_FROM_NUMBER, ...form }),
+    body: new URLSearchParams(withFrom ? { From: process.env.TWILIO_FROM_NUMBER, ...form } : form),
   });
   const j = await r.json().catch(() => ({}));
   return r.ok ? { ok: true, id: j.sid } : { ok: false, error: j.message || `Twilio returned ${r.status}` };
 }
 
-async function deliver(target, text, lang) {
+async function placeCall(to, text, lang, base) {
+  const own = `${base}/api/notify?twiml=1&lang=${lang}&t=${encodeURIComponent(text)}`;
+  const attempts = [
+    ['spoken alert', { To: to, Url: own, Method: 'GET' }, true],
+    ['spoken alert', { To: to, Url: own, Method: 'GET' }, false],
+    ['Twilio sample message (trial limit)', { To: to, Url: TEMPLATE_URL }, false],
+  ];
+  let last;
+  for (const [mode, form, withFrom] of attempts) {
+    last = await twilio('Calls', form, withFrom);
+    if (last.ok) return { ...last, mode };
+    if (!trialRefusal(last.error)) return last;
+  }
+  return last;
+}
+
+async function deliver(target, text, lang, base) {
   const i = target.indexOf(':');
   const channel = target.slice(0, i), to = target.slice(i + 1);
   try {
     if (channel === 'call') {
-      const v = VOICE[lang] || VOICE.en;
-      const say = `<Say voice="${v.voice}" language="${v.language}">${xml(text)}</Say>`;
-      const twiml = `<Response><Pause length="1"/>${say}<Pause length="1"/>${say}</Response>`;
-      return { channel, to: mask(to), ...(await twilio('Calls', { To: to, Twiml: twiml })) };
+      return { channel, to: mask(to), ...(await placeCall(to, text, lang, base)) };
     }
     if (channel === 'sms') return { channel, to: mask(to), ...(await twilio('Messages', { To: to, Body: text })) };
     if (channel === 'tg') {
@@ -59,6 +84,13 @@ async function deliver(target, text, lang) {
 
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
+  const q = new URL(req.url, 'http://local').searchParams;
+  if (q.get('twiml')) {
+    const lang = q.get('lang') === 'te' ? 'te' : 'en';
+    const text = String(q.get('t') || 'FireSight alert. Please check the dashboard.').slice(0, 700);
+    res.setHeader('Content-Type', 'text/xml; charset=utf-8');
+    return res.status(200).send(twimlFor(text, lang));
+  }
   if (req.method === 'GET') {
     return res.status(200).json({
       service: 'firesight-notify', keyRequired: !!process.env.DEMO_KEY,
@@ -85,6 +117,7 @@ module.exports = async (req, res) => {
     if (!ROLES.includes(role)) return res.status(400).json({ error: `Unknown role "${role}"` });
     list = targets(role);
   }
-  const results = await Promise.all(list.map(t => deliver(t, msg, lang === 'te' ? 'te' : 'en')));
+  const base = process.env.PUBLIC_URL || `https://${req.headers['x-forwarded-host'] || req.headers.host}`;
+  const results = await Promise.all(list.map(t => deliver(t, msg, lang === 'te' ? 'te' : 'en', base)));
   return res.status(200).json({ ok: results.some(r => r.ok), results });
 };

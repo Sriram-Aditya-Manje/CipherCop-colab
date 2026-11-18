@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>FireSight · CipherCop Fire Risk Map</title>
+<link rel="stylesheet" href="vendor/maplibre-gl.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+Telugu:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="respond.css">
+</head>
+<body data-mode="prevent">
+<div id="map" aria-label="Map of buildings and incidents"></div>
+
+<!-- startup -->
+<div id="boot" role="status" aria-live="polite">
+  <div class="boot-in">
+    <div class="mark" aria-hidden="true"><span></span></div>
+    <h1>FireSight</h1>
+    <p class="boot-sub">Fire prevention and response for Hyderabad</p>
+    <div class="bar"><i id="bootBar"></i></div>
+    <ol id="bootSteps">
+      <li data-k="b">Loading buildings</li>
+      <li data-k="r">Loading street network</li>
+      <li data-k="m">Loading risk model</li>
+      <li data-k="l">Connecting to incident feed</li>
+    </ol>
+  </div>
+</div>
+
+<!-- top bar -->
+<header id="topbar">
+  <div class="brand"><div class="mark sm" aria-hidden="true"><span></span></div><b>FireSight</b><span class="mock" title="All buildings, records and incidents are generated">Demo data</span></div>
+  <div class="seg" role="tablist" aria-label="Mode">
+    <button role="tab" data-m="prevent" aria-selected="true">Prevent</button>
+    <button role="tab" data-m="detect" aria-selected="false">Detect<span id="liveCount" class="cnt" hidden>0</span></button>
+  </div>
+  <div class="tb-right">
+    <div class="seg small" role="group" aria-label="Time of day">
+      <button data-t="day" aria-pressed="false">Day</button><button data-t="night" aria-pressed="true">Night</button>
+    </div>
+    <button class="tb-btn" data-fly="old_city">Old City</button>
+    <button class="tb-btn" data-fly="ameerpet">Ameerpet</button>
+    <button id="backendPill" class="tb-btn status" title="Alert delivery status"><i></i><span>Simulated alerts</span></button>
+  </div>
+</header>
+
+<!-- prevent: layers + legend -->
+<section id="layers" class="float only-prevent" aria-label="Map layers">
+  <button class="phead" aria-expanded="true" aria-controls="layersBody"><span class="ptitle">What to show<small id="layerNow">Fire risk</small></span><i class="chev" aria-hidden="true"></i></button>
+  <div class="pbody" id="layersBody"><div class="pin">
+  <div class="layer-list">
+    <button class="layer on" data-mode="risk"><i style="--c:var(--l3)"></i><span>Fire risk<small>Model score, 1 to 10</small></span></button>
+    <button class="layer" data-mode="paper"><i style="--c:#9b7bea"></i><span>Paper vs reality<small>Records that don't match the building</small></span></button>
+    <button class="layer" data-mode="reach"><i style="--c:var(--accent)"></i><span>Fire tender reach<small>Road width and drive time</small></span></button>
+    <button class="layer" data-mode="spread"><i style="--c:var(--l2)"></i><span>Spread clusters<small>Buildings joined wall to wall</small></span></button>
+  </div>
+  <div class="toggles">
+    <label class="tg"><input type="checkbox" id="tgFires"><span>Past fires</span></label>
+    <label class="tg"><input type="checkbox" id="tgPoi" checked><span>Stations and hazards</span></label>
+  </div>
+  <div id="legend"></div>
+  </div></div>
+</section>
+
+<!-- prevent: model panel -->
+<section id="panel" class="float only-prevent collapsed" aria-label="Model summary">
+  <button class="phead" aria-expanded="false" aria-controls="panelBody"><span class="ptitle">What the model learned<small id="modelNow">Random forest, satellite and map features</small></span><i class="chev" aria-hidden="true"></i></button>
+  <div class="pbody" id="panelBody"><div class="pin">
+  <div id="bars"></div>
+  <div class="stats" id="stats"></div>
+  <h2 class="mt">Highest risk right now</h2>
+  <div id="topList"></div>
+  <details><summary>How the score is built</summary>
+    <p class="note">The model gives up to 70 points from satellite and map features. Records add up to 30: fire NOC, approved floors, electrical load and the Osmania study's high-risk wards. People inside at that hour adjust the result. Records are not used to train the model, so it can run on any city.</p>
+    <p class="note">Every building, record and past fire here is generated from rules. The neighbourhoods are real; the geometry is simulated.</p>
+  </details>
+  </div></div>
+</section>
+
+<!-- building sheet -->
+<section id="sheet" aria-live="polite"></section>
+
+<script src="vendor/maplibre-gl.js"></script>
+<script>
+/* ============ shared state ============ */
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+let state = {mode:'risk', t:'night', fires:false, poi:true, app:'prevent'};
+let data = {}, model = {};
+const mpp = z => 156543.03 * Math.cos(17.4*Math.PI/180) / Math.pow(2,z);
+const RISK = ['#2BA36B','#2BA36B','#56B26A','#E8C14A','#F0B93B','#EE9A33','#EE7F2D','#E85A33','#E23B3B','#C92A2F','#A81F27'];
+const riskRamp = p => ['interpolate',['linear'],['get',p],1,RISK[1],3,RISK[3],4,RISK[4],6,RISK[6],7,RISK[7],8,RISK[8],10,RISK[10]];
+const col = s => s>=7?'var(--l3)':s>=4?'var(--l1)':'var(--ok)';
+const label = u => ({residential:'Residential',mixed:'Shops below, homes above',commercial:'Commercial',coaching:'Coaching centre',godown:'Godown or storage',educational:'School'})[u]||u;
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const map = new maplibregl.Map({
+  container:'map',
+  style:{version:8, sources:{}, layers:[{id:'bg',type:'background',paint:{'background-color':'#0B1320'}}]},
+  center:[78.4615,17.3995], zoom:12.3, maxPitch:75, antialias:true, attributionControl:false
+});
+window.map = map;
+
+/* ============ boot with real steps ============ */
+let done = 0;
+function step(k){ const li=$(`#bootSteps li[data-k="${k}"]`); if(!li || li.classList.contains('ok')) return; li.classList.add('ok'); done++; $('#bootBar').style.width = (done/4*100)+'%'; const nx=li.nextElementSibling; nx && nx.classList.add('on'); }
+$$('#bootSteps li')[0].classList.add('on');
+const load = (name, k) => fetch(`data/${name}.json`).then(r=>{ if(!r.ok) throw new Error(`${name}.json returned ${r.status}`); return r.json(); }).then(j=>{ k && step(k); return j; });
+Promise.all([load('buildings','b'), load('roads'), load('points'), load('model','m')])
+.then(([b,r,p,m])=>{ step('r'); data={b,r,p}; model=m; whenReady(init); })
+.catch(e=>{ $('#boot .boot-sub').textContent = 'Could not load map data ('+e.message+'). Reload the page to try again.'; $('#boot').classList.add('err'); });
+function whenReady(fn){ map.loaded() ? fn() : map.on('load', fn); }
+
+function centroids(fc){
+  return {type:'FeatureCollection',features:fc.features.map(f=>{
+    const c=f.geometry.coordinates[0]; let x=0,y=0; for(let i=0;i<4;i++){x+=c[i][0];y+=c[i][1];}
+    return {type:'Feature',geometry:{type:'Point',coordinates:[x/4,y/4]},properties:{sd:f.properties.sd,sn:f.properties.sn,id:f.properties.id}};
+  })};
+}
+
+async function tryBasemap(){
+  try{
+    const ctl = new AbortController(); setTimeout(()=>ctl.abort(), 2500);
+    const r = await fetch('https://a.basemaps.cartocdn.com/dark_nolabels/12/2914/1863.png', {signal:ctl.signal});
+    if(!r.ok) return;
+    map.addSource('carto',{type:'raster',tileSize:256,tiles:['a','b','c'].map(s=>`https://${s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}.png`)});
+    map.addLayer({id:'carto',type:'raster',source:'carto',paint:{'raster-opacity':0.5}}, 'roads');
+  }catch(e){}
+}
+
+let stationMarkers = [];
+function init(){
+  map.addSource('roads',{type:'geojson',data:data.r});
+  map.addSource('bld',{type:'geojson',data:data.b,promoteId:'id'});
+  map.addSource('pts',{type:'geojson',data:centroids(data.b)});
+  map.addSource('poi',{type:'geojson',data:data.p});
+  map.addLayer({id:'roads',type:'line',source:'roads',paint:{'line-color':'#18263B',
+    'line-width':['interpolate',['exponential',2],['zoom'],11,['*',['get','width'],1/mpp(11)],20,['*',['get','width'],1/mpp(20)]]}});
+  map.addLayer({id:'heat',type:'heatmap',source:'pts',maxzoom:16.5,paint:{
+    'heatmap-weight':['interpolate',['linear'],['get','sn'],20,0,55,0.25,75,1],
+    'heatmap-intensity':['interpolate',['linear'],['zoom'],11,0.9,16,2.2],
+    'heatmap-radius':['interpolate',['linear'],['zoom'],11,10,14,26,16,40],
+    'heatmap-color':['interpolate',['linear'],['heatmap-density'],0,'rgba(0,0,0,0)',0.15,'rgba(240,185,59,.22)',0.35,'rgba(238,127,45,.5)',0.6,'rgba(232,90,51,.75)',0.85,'#E23B3B',1,'#FFE3B0'],
+    'heatmap-opacity':['interpolate',['linear'],['zoom'],14.5,0.95,16.3,0]}});
+  map.addLayer({id:'bld3d',type:'fill-extrusion',source:'bld',minzoom:14,paint:{
+    'fill-extrusion-color':riskRamp('rn'),'fill-extrusion-height':['get','height'],'fill-extrusion-base':0,
+    'fill-extrusion-opacity':['interpolate',['linear'],['zoom'],14,0,15,0.9],'fill-extrusion-vertical-gradient':true}});
+  map.addLayer({id:'fires',type:'circle',source:'poi',filter:['==',['get','kind'],'past_fire'],layout:{visibility:'none'},paint:{
+    'circle-color':'#E23B3B','circle-radius':['interpolate',['linear'],['zoom'],12,2.5,17,7],'circle-stroke-color':'#FFE3B0','circle-stroke-width':1,'circle-opacity':.85}});
+  map.addLayer({id:'hazards',type:'circle',source:'poi',filter:['==',['get','kind'],'hazard'],paint:{
+    'circle-color':'#F0B93B','circle-radius':['interpolate',['linear'],['zoom'],12,3,17,7],'circle-stroke-color':'#0B1320','circle-stroke-width':1.5}});
+  tryBasemap();
+  renderPanel(); setMode('risk'); bind();
+  if(window.initRespond) initRespond(()=>finishBoot()); else finishBoot();
+}
+function finishBoot(){
+  step('l');
+  setTimeout(()=>{ $('#boot').classList.add('gone'); setTimeout(()=>$('#boot') && $('#boot').remove(), 600); }, reduce?0:350);
+  map.flyTo({center:model.areas.old_city.center,zoom:15.6,pitch:58,bearing:-18,duration:reduce?0:2600});
+}
+
+/* ============ prevent mode ============ */
+const MODES = {
+  risk:{title:()=>`Fire risk at ${state.t==='night'?'night':'day'}`, color:()=>riskRamp(state.t==='night'?'rn':'rd'),
+    legend:[[RISK[9],'8 to 10, high'],[RISK[7],'7, high'],[RISK[5],'4 to 6, medium'],[RISK[2],'1 to 3, low']]},
+  paper:{title:()=>'Paper vs reality', color:()=>['case',['>',['get','extra'],0],'#E23B3B',['==',['get','noc'],'missing'],'#9B7BEA',['==',['get','noc'],'expired'],'#F0B93B',['==',['get','permit'],'not_found'],'#5B6B82','#22324A'],
+    legend:[['#E23B3B','Floors above approved plan'],['#9B7BEA','Fire NOC required, not found'],['#F0B93B','Fire NOC expired'],['#5B6B82','No permit record found'],['#22324A','Matches records']]},
+  reach:{title:()=>'Fire tender reach', color:()=>['case',['!',['get','access']],'#E23B3B',['>',['get','drive'],8],'#EE7F2D',['>',['get','drive'],5],'#F0B93B','#2BA36B'],
+    legend:[['#E23B3B','Road under 6 m, tender cannot enter'],['#EE7F2D','Over 8 min drive'],['#F0B93B','5 to 8 min'],['#2BA36B','Under 5 min']]},
+  spread:{title:()=>'Fire spread clusters', color:()=>['case',['>=',['get','cluster'],15],'#E23B3B',['>=',['get','cluster'],6],'#EE7F2D',['>=',['get','cluster'],3],'#F0B93B','#2BA36B'],
+    legend:[['#E23B3B','15 or more joined buildings'],['#EE7F2D','6 to 14 joined'],['#F0B93B','3 to 5 joined'],['#2BA36B','Stands alone']]},
+};
+function buildingColor(){
+  if(state.app==='detect') return ['case',['boolean',['feature-state','inc'],false],'#E23B3B',['boolean',['feature-state','sel'],false],'#47C4E8','#26364F'];
+  return ['case',['boolean',['feature-state','inc'],false],'#FF5A4F',['boolean',['feature-state','sel'],false],'#FFFFFF',MODES[state.mode].color()];
+}
+function setMode(m){
+  state.mode=m;
+  $$('.layer').forEach(b=>b.classList.toggle('on',b.dataset.mode===m));
+  map.setPaintProperty('bld3d','fill-extrusion-color',buildingColor());
+  map.setLayoutProperty('heat','visibility', (m==='risk' && state.app==='prevent')?'visible':'none');
+  const L=MODES[m];
+  $('#layerNow').textContent = $(`.layer[data-mode="${m}"]`).firstElementChild.nextElementSibling.firstChild.textContent;
+  $('#legend').innerHTML=`<h3>${L.title()}</h3>`+L.legend.map(([c,t])=>`<div class="lg"><i style="background:${c}"></i>${t}</div>`).join('');
+}
+window.setAppMode = function(app){
+  state.app = app; document.body.dataset.mode = app;
+  $$('#topbar .seg [data-m]').forEach(b=>b.setAttribute('aria-selected', String(b.dataset.m===app)));
+  setMode(state.mode);
+  if(app==='detect') closeSheet();
+  window.onAppMode && window.onAppMode(app);
+};
+function setTime(t){
+  state.t=t;
+  $$('[data-t]').forEach(b=>b.setAttribute('aria-pressed', String(b.dataset.t===t)));
+  map.setPaintProperty('heat','heatmap-weight',['interpolate',['linear'],['get',t==='night'?'sn':'sd'],20,0,55,0.25,75,1]);
+  setMode(state.mode); renderTop();
+  if(selected) openSheet(selected);
+  window.onTimeChange && window.onTimeChange(t);
+}
+window.getTime = ()=>state.t;
+
+function renderPanel(){
+  const max=model.importances[0].w;
+  $('#modelNow').textContent = `Top factor: ${model.importances[0].label.toLowerCase()}`;
+  $('#bars').innerHTML=model.importances.map(i=>`<div class="wbar"><span>${i.label}</span><b>${(i.w*100).toFixed(1)}%</b><i style="width:${(i.w/max*100).toFixed(0)}%"></i></div>`).join('');
+  $('#stats').innerHTML=`<div><b>${model.n_buildings.toLocaleString('en-IN')}</b><span>buildings scored</span></div><div><b>${model.n_fire_events}</b><span>past fires, generated</span></div><div><b>${model.auc.toFixed(2)}</b><span>AUC on held-out buildings</span></div>`;
+  renderTop();
+}
+function renderTop(){
+  const k=state.t==='night'?'sn':'sd', r=state.t==='night'?'rn':'rd';
+  const top=[...data.b.features].sort((a,b)=>b.properties[k]-a.properties[k]).slice(0,6);
+  $('#topList').innerHTML=top.map(f=>{const p=f.properties;return `<button class="toprow" data-id="${p.id}"><span><b>${label(p.use)}</b><small>${p.id}, ${p.area}</small></span><em style="background:${col(p[r])}">${p[r]}</em></button>`}).join('');
+  $$('.toprow').forEach(el=>el.onclick=()=>{
+    const f=data.b.features.find(x=>x.properties.id===el.dataset.id);
+    map.flyTo({center:f.geometry.coordinates[0][0],zoom:17.6,pitch:60,duration:reduce?0:1600}); select(f.properties.id); openSheet(f.properties);
+    if(innerWidth<760) setCollapsed($('#panel'), true);
+  });
+}
+
+let selected=null, selId=null;
+function select(id){ if(selId) map.setFeatureState({source:'bld',id:selId},{sel:false}); selId=id; if(id) map.setFeatureState({source:'bld',id},{sel:true}); }
+function openSheet(p){
+  selected=p;
+  const r=state.t==='night'?p.rn:p.rd, lvl=r>=7?'High':r>=4?'Medium':'Low';
+  const reasons=(typeof p.reasons==='string'?JSON.parse(p.reasons):p.reasons)||[];
+  const gov=(typeof p.gov==='string'?JSON.parse(p.gov):p.gov)||[];
+  const people=state.t==='night'?p.p_night:p.p_day;
+  const noc={valid:['Valid','ok'],expired:['Expired','warn'],missing:['Required, not found','bad'],not_required:['Not required','']}[p.noc];
+  const permit={'TS-bPASS':['TS-bPASS','ok'],'DPMS/legacy':['Older permit','ok'],not_found:['No record found','warn'],not_required:['Not required, small plot','']}[p.permit];
+  $('#sheet').innerHTML=`
+   <div class="sh-head"><div class="score" style="--c:${col(r)}"><b>${r}</b><span>of 10</span></div>
+     <div><h2>${label(p.use)}</h2><p>${lvl} risk at ${state.t}. <span class="mono">${p.id}</span>, ${p.area}</p></div>
+     <button class="x" onclick="closeSheet()" aria-label="Close">×</button></div>
+   <h3>Why the model flags it</h3>${reasons.length?reasons.map(t=>`<p class="why m">${t}</p>`).join(''):'<p class="why none">Nothing stands out against the area average</p>'}
+   ${gov.length?`<h3>From records</h3>${gov.map(t=>`<p class="why g">${t}</p>`).join('')}`:''}
+   <h3>Building</h3><div class="facts">
+     <div><span>Height</span><b>${p.height} m, ${p.floors} floors</b></div>
+     <div><span>People inside at ${state.t}</span><b>About ${people} <small>(max ${p.p_max})</small></b></div>
+     <div><span>Built-up area</span><b>${p.built_up.toLocaleString('en-IN')} m²</b></div>
+     <div><span>Age</span><b>${p.age} years, built ${p.year}</b></div>
+     <div><span>Fire NOC</span><b class="${noc[1]}">${noc[0]}</b></div>
+     <div><span>Building permit</span><b class="${p.extra>0?'bad':permit[1]}">${permit[0]}${['TS-bPASS','DPMS/legacy'].includes(p.permit)?`, ${p.appr_floors} floors approved`:''}</b></div>
+     <div><span>Access road</span><b class="${p.access?'':'bad'}">${p.road} m${p.access?'':', tender cannot enter'}</b></div>
+     <div><span>Drive from station</span><b class="${p.drive>8?'bad':p.drive>5?'warn':'ok'}">${p.drive} min</b></div>
+     <div><span>Gap to neighbour</span><b class="${p.gap<2?'warn':''}">${p.gap} m</b></div>
+     <div><span>Joined cluster</span><b class="${p.cluster>=6?'warn':''}">${p.cluster} buildings</b></div>
+     <div><span>Hazards within 100 m</span><b class="${p.hazards?'warn':''}">${p.hazards}</b></div>
+     <div><span>Electrical load</span><b class="${p.overload?'warn':''}">${p.kw} kW${p.overload?', over sanctioned':''}</b></div>
+   </div>
+   <p class="note">Advisory only. The record is generated from building size, age and area profile.</p>`;
+  $('#sheet').classList.add('open'); document.body.classList.add('sheet-open');
+}
+function closeSheet(){ $('#sheet').classList.remove('open'); document.body.classList.remove('sheet-open'); select(null); selected=null; }
+window.closeSheet = closeSheet;
+function setCollapsed(sec, c){ sec.classList.toggle('collapsed', c); sec.querySelector('.phead').setAttribute('aria-expanded', String(!c)); }
+
+function bind(){
+  $$('.layer').forEach(b=>b.onclick=()=>setMode(b.dataset.mode));
+  $$('[data-t]').forEach(b=>b.onclick=()=>setTime(b.dataset.t));
+  $$('#topbar .seg [data-m]').forEach(b=>b.onclick=()=>setAppMode(b.dataset.m));
+  $$('[data-fly]').forEach(b=>b.onclick=()=>map.flyTo({center:model.areas[b.dataset.fly].center,zoom:15.8,pitch:58,bearing:-18,duration:reduce?0:2200}));
+  $('#tgFires').onchange=e=>{ map.setLayoutProperty('fires','visibility',e.target.checked?'visible':'none'); };
+  $('#tgPoi').onchange=e=>{ state.poi=e.target.checked; map.setLayoutProperty('hazards','visibility',state.poi?'visible':'none'); stationMarkers.forEach(m=>m.getElement().style.display=state.poi?'':'none'); };
+  $$('.float > .phead').forEach(b=>b.onclick=()=>setCollapsed(b.parentElement, !b.parentElement.classList.contains('collapsed')));
+  if(innerWidth<760) setCollapsed($('#layers'), true);
+  map.on('click','bld3d',e=>{
+    const f=e.features[0];
+    if(window.pickingBuilding){ window.pickingBuilding(f.properties); return; }
+    if(state.app==='detect'){ window.onDetectBuildingClick && window.onDetectBuildingClick(f.properties); return; }
+    select(f.properties.id); openSheet(f.properties);
+  });
+  map.on('click',e=>{ if(!map.queryRenderedFeatures(e.point,{layers:['bld3d']}).length && state.app==='prevent') closeSheet(); });
+  map.on('mouseenter','bld3d',()=>map.getCanvas().style.cursor='pointer');
+  map.on('mouseleave','bld3d',()=>map.getCanvas().style.cursor='');
+  const pop=new maplibregl.Popup({closeButton:false,offset:8,className:'tip'});
+  map.on('mouseenter','hazards',e=>pop.setLngLat(e.lngLat).setHTML(`${e.features[0].properties.name}`).addTo(map));
+  map.on('mouseleave','hazards',()=>pop.remove());
+}
+</script>
+<script src="respond.js"></script>
+</body>
+</html>

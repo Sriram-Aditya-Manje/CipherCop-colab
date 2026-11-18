@@ -1,0 +1,103 @@
+{
+ "auc": 0.744,
+ "n_buildings": 2315,
+ "n_fire_buildings": 294,
+ "n_fire_events": 374,
+ "importances": [
+  {
+   "key": "mixed_use",
+   "label": "Mixed use / godown",
+   "w": 0.2224
+  },
+  {
+   "key": "age_years",
+   "label": "Building age",
+   "w": 0.2043
+  },
+  {
+   "key": "built_up_m2",
+   "label": "Built-up area",
+   "w": 0.1205
+  },
+  {
+   "key": "density_50m",
+   "label": "Buildings within 50 m",
+   "w": 0.0991
+  },
+  {
+   "key": "gap_m",
+   "label": "Gap to nearest building",
+   "w": 0.0894
+  },
+  {
+   "key": "drive_min",
+   "label": "Drive time from fire station",
+   "w": 0.085
+  },
+  {
+   "key": "cluster_size",
+   "label": "Joined-building cluster size",
+   "w": 0.0579
+  },
+  {
+   "key": "road_w",
+   "label": "Road width at front",
+   "w": 0.0453
+  },
+  {
+   "key": "hazard_100m",
+   "label": "Hazards within 100 m",
+   "w": 0.0352
+  },
+  {
+   "key": "floors",
+   "label": "Floors (satellite height)",
+   "w": 0.0329
+  },
+  {
+   "key": "assembly_use",
+   "label": "Commercial / coaching / school",
+   "w": 0.008
+  }
+ ],
+ "areas": {
+  "old_city": {
+   "name": "Old City (Charminar)",
+   "center": [
+    78.4747,
+    17.3616
+   ]
+  },
+  "ameerpet": {
+   "name": "Ameerpet",
+   "center": [
+    78.4482,
+    17.4375
+   ]
+  }
+ },
+ "counts": {
+  "day": {
+   "1": 26,
+   "2": 178,
+   "3": 361,
+   "4": 446,
+   "5": 435,
+   "6": 374,
+   "7": 359,
+   "8": 122,
+   "9": 14
+  },
+  "night": {
+   "1": 15,
+   "2": 205,
+   "3": 389,
+   "4": 421,
+   "5": 430,
+   "6": 371,
+   "7": 367,
+   "8": 108,
+   "9": 9
+  }
+ }
+}
